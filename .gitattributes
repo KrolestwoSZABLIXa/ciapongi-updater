@@ -1,0 +1,5 @@
+# Mark large binary files as generated or vendored to keep language stats accurate
+*.png linguist-vendored
+*.mp3 linguist-vendored
+gradlew linguist-vendored
+gradle/ linguist-vendored
