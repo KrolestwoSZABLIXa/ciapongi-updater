@@ -1,9 +1,15 @@
-# Ciapongi Updater 🚂
+<p align="center">
+  <img src="src/main/resources/assets/ciapongiupdater/logo.png" width="128" height="128" alt="Ciapongi Updater Logo">
+</p>
 
-![Minecraft Version](https://img.shields.io/badge/Minecraft-1.20.1-blue?style=flat-square&logo=minecraft)
-![Fabric](https://img.shields.io/badge/Loader-Fabric-orange?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Version](https://img.shields.io/badge/Version-1.0.0-blue?style=flat-square)
+# <p align="center">Ciapongi Updater</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Minecraft-1.20.1-blue?style=flat-square&logo=minecraft" alt="Minecraft Version">
+  <img src="https://img.shields.io/badge/Loader-Fabric-orange?style=flat-square" alt="Fabric">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/Version-1.0.0-blue?style=flat-square" alt="Version">
+</p>
 
 **Ciapongi Updater** to wyspecjalizowany mod do Minecrafta (Fabric), zaprojektowany w celu automatyzacji aktualizacji paczek zasobów (Resource Packs) oraz plików modów dla graczy serwera Ciapongi.
 
