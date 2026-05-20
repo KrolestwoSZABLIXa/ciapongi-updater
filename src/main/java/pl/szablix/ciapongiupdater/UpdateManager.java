@@ -175,6 +175,12 @@ public class UpdateManager {
                 downloadedTotal += mFile.size;
             }
 
+            List<String> currentFiles = new ArrayList<>();
+            for (ManifestFile mFile : manifest.files) {
+                currentFiles.add(mFile.path);
+            }
+            saveUpdateInfo(currentFiles);
+
             statusKey = "status.complete";
             statusArg = "";
             needsRestart = true;
@@ -189,38 +195,45 @@ public class UpdateManager {
     }
 
     private void removeUnexpectedFiles() {
-        Path gameDir = FabricLoader.getInstance().getGameDir();
-        String[] monitoredDirs = {"mods", "resourcepacks"};
-        
-        for (String dirName : monitoredDirs) {
-            Path dirPath = gameDir.resolve(dirName);
-            if (!Files.exists(dirPath)) continue;
+        if (!Files.exists(CONFIG_PATH)) return;
 
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(dirPath)) {
-                for (Path file : stream) {
-                    if (Files.isDirectory(file)) continue;
-                    
-                    String relPath = gameDir.relativize(file).toString().replace("\\\\", "/");
-                    
-                    // Don't delete our own mod!
-                    if (relPath.contains("ciapongiupdater")) continue;
+        try (Reader reader = Files.newBufferedReader(CONFIG_PATH)) {
+            UpdateInfo oldInfo = GSON.fromJson(reader, UpdateInfo.class);
+            if (oldInfo == null || oldInfo.files == null) return;
 
-                    boolean inManifest = false;
-                    for (ManifestFile mFile : manifest.files) {
-                        if (mFile.path.equals(relPath)) {
-                            inManifest = true;
-                            break;
-                        }
-                    }
-
-                    if (!inManifest) {
-                        smartDelete(file);
+            for (String oldFilePath : oldInfo.files) {
+                boolean stillInManifest = false;
+                for (ManifestFile mFile : manifest.files) {
+                    if (mFile.path.equals(oldFilePath)) {
+                        stillInManifest = true;
+                        break;
                     }
                 }
-            } catch (IOException e) {
-                LOGGER.error("Error cleaning directory: " + dirName, e);
+
+                if (!stillInManifest) {
+                    Path toDelete = FabricLoader.getInstance().getGameDir().resolve(oldFilePath);
+                    if (Files.exists(toDelete)) {
+                        smartDelete(toDelete);
+                    }
+                }
             }
+        } catch (IOException e) {
+            LOGGER.error("Error reading old update info for cleanup", e);
         }
+    }
+
+    private void saveUpdateInfo(List<String> files) throws IOException {
+        Files.createDirectories(CONFIG_PATH.getParent());
+        UpdateInfo info = new UpdateInfo();
+        info.files = files;
+
+        try (Writer writer = Files.newBufferedWriter(CONFIG_PATH)) {
+            GSON.toJson(info, writer);
+        }
+    }
+
+    private static class UpdateInfo {
+        List<String> files;
     }
 
     private void smartDelete(Path path) {
