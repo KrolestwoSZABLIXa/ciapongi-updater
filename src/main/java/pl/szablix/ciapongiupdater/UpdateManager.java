@@ -15,6 +15,7 @@ import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -36,18 +37,8 @@ public class UpdateManager {
     public volatile String latestVersionTag = "";
     public volatile String downloadUrl = "";
 
-    private final List<PendingOperation> pendingOperations = new ArrayList<>();
+    private final Map<Path, Path> pendingOperations = new LinkedHashMap<>();
     private final boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
-
-    private static class PendingOperation {
-        Path target;
-        Path source; // if null, it's a deletion
-
-        PendingOperation(Path target, Path source) {
-            this.target = target;
-            this.source = source;
-        }
-    }
 
     public void checkForUpdates() {
         statusKey = "status.checking";
@@ -159,18 +150,44 @@ public class UpdateManager {
     private void scheduleWindowsUpdate() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                Path script = Files.createTempFile("ciapongi-update", ".bat");
+                Path gameDir = FabricLoader.getInstance().getGameDir();
+                Path script = gameDir.resolve("ciapongi-updater-cleanup.bat");
                 StringBuilder sb = new StringBuilder();
                 sb.append("@echo off\n");
                 sb.append("chcp 65001 > nul\n");
-                sb.append("timeout /t 3 /nobreak > nul\n");
-                for (PendingOperation op : pendingOperations) {
-                    sb.append("del /f /q \"").append(op.target.toAbsolutePath()).append("\"\n");
-                    if (op.source != null) {
-                        sb.append("move /y \"").append(op.source.toAbsolutePath()).append("\" \"").append(op.target.toAbsolutePath()).append("\"\n");
+                sb.append("set RETRIES=0\n");
+                sb.append(":retry_loop\n");
+                sb.append("set /a RETRIES+=1\n");
+                sb.append("if %RETRIES% gtr 30 goto end\n");
+                sb.append("set SUCCESS=1\n");
+                
+                for (Map.Entry<Path, Path> entry : pendingOperations.entrySet()) {
+                    String target = entry.getKey().toAbsolutePath().toString();
+                    Path sourcePath = entry.getValue();
+                    
+                    sb.append("if exist \"").append(target).append("\" (\n");
+                    sb.append("  del /f /q \"").append(target).append("\"\n");
+                    sb.append("  if exist \"").append(target).append("\" set SUCCESS=0\n");
+                    sb.append(")\n");
+                    
+                    if (sourcePath != null) {
+                        String source = sourcePath.toAbsolutePath().toString();
+                        sb.append("if exist \"").append(source).append("\" (\n");
+                        sb.append("  if not exist \"").append(target).append("\" (\n");
+                        sb.append("    move /y \"").append(source).append("\" \"").append(target).append("\"\n");
+                        sb.append("    if not exist \"").append(target).append("\" set SUCCESS=0\n");
+                        sb.append("  )\n");
+                        sb.append(")\n");
                     }
                 }
-                sb.append("del \"").append(script.toAbsolutePath()).append("\"\n");
+                
+                sb.append("if %SUCCESS% == 0 (\n");
+                sb.append("  timeout /t 1 /nobreak > nul\n");
+                sb.append("  goto retry_loop\n");
+                sb.append(")\n");
+                sb.append(":end\n");
+                sb.append("del \"%~f0\"\n");
+                
                 Files.writeString(script, sb.toString());
 
                 Runtime.getRuntime().exec("cmd /c start /min \"\" \"" + script.toAbsolutePath() + "\"");
@@ -239,7 +256,7 @@ public class UpdateManager {
                         LOGGER.info("Deleted old file: " + filePath);
                     } catch (IOException e) {
                         if (isWindows) {
-                            pendingOperations.add(new PendingOperation(path, null));
+                            pendingOperations.put(path, null);
                             LOGGER.info("Scheduled deletion for locked file: " + filePath);
                         } else {
                             LOGGER.error("Failed to delete " + filePath, e);
@@ -274,14 +291,17 @@ public class UpdateManager {
                 if (!entry.isDirectory()) {
                     Path target = gameDir.resolve(name);
                     Files.createDirectories(target.getParent());
+                    
+                    byte[] data = zis.readAllBytes();
+                    
                     try {
-                        Files.copy(zis, target, StandardCopyOption.REPLACE_EXISTING);
+                        Files.write(target, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
                         LOGGER.info("Extracted: " + name);
                     } catch (IOException e) {
                         if (isWindows) {
                             Path updatedPath = target.resolveSibling(target.getFileName().toString() + ".updated");
-                            Files.copy(zis, updatedPath, StandardCopyOption.REPLACE_EXISTING);
-                            pendingOperations.add(new PendingOperation(target, updatedPath));
+                            Files.write(updatedPath, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                            pendingOperations.put(target, updatedPath);
                             LOGGER.info("Scheduled move for locked file: " + name);
                         } else {
                             throw e;
