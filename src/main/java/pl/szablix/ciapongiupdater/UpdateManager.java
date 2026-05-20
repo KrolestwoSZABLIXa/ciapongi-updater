@@ -285,8 +285,9 @@ public class UpdateManager {
     }
 
     private void downloadFileGranular(String url, Path target, long alreadyDownloaded, long totalSize) throws Exception {
+        String encodedUrl = url.replace(" ", "%20");
         HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
-        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url)).build();
+        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(encodedUrl)).build();
         HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
 
         byte[] data;
