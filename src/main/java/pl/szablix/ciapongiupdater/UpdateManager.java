@@ -22,9 +22,26 @@ import java.util.zip.ZipInputStream;
 
 public class UpdateManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("CiapongiUpdater-UpdateManager");
-    private static final String GITHUB_API_URL = "https://api.github.com/repos/KrolestwoSZABLIXa/Ciapongi-RP/releases/latest";
+    private static final String MANIFEST_URL = "https://raw.githubusercontent.com/KrolestwoSZABLIXa/Ciapongi-RP/main/manifest.json";
+    private static final String RAW_BASE_URL = "https://raw.githubusercontent.com/KrolestwoSZABLIXa/Ciapongi-RP/main/";
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("ciapongiupdater/latestversion.json");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    // 120-byte dummy JAR trick from AutoModpack to bypass Windows file locks
+    private static final byte[] DUMMY_JAR = {
+            80, 75, 3, 4, 20, 0, 8, 8, 8, 0, 89, 116, -44, 86, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 4, 0, 77, 69, 84,
+            65, 45, 73, 78, 70, 47, 77, 65, 78, 73, 70, 69, 83, 84, 46, 77,
+            70, -2, -54, 0, 0, -13, 77, -52, -53, 76, 75, 45, 46, -47, 13, 75,
+            45, 42, -50, -52, -49, -77, 82, 48, -44, 51, -32, -27, -30, -27, 2, 0,
+            80, 75, 7, 8, -78, 127, 2, -18, 27, 0, 0, 0, 25, 0, 0, 0,
+            80, 75, 1, 2, 20, 0, 20, 0, 8, 8, 8, 0, 89, 116, -44, 86,
+            -78, 127, 2, -18, 27, 0, 0, 0, 25, 0, 0, 0, 20, 0, 4, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 77, 69,
+            84, 65, 45, 73, 78, 70, 47, 77, 65, 78, 73, 70, 69, 83, 84, 46,
+            77, 70, -2, -54, 0, 0, 80, 75, 5, 6, 0, 0, 0, 0, 1, 0,
+            1, 0, 70, 0, 0, 0, 97, 0, 0, 0, 0, 0,
+    };
 
     public volatile float progress = 0;
     public volatile String statusKey = "status.checking";
@@ -34,10 +51,8 @@ public class UpdateManager {
     public volatile boolean isWorking = true;
     public volatile boolean updateAvailable = false;
     public volatile boolean needsRestart = false;
-    public volatile String latestVersionTag = "";
-    public volatile String downloadUrl = "";
-
-    private final Map<Path, Path> pendingOperations = new LinkedHashMap<>();
+    
+    private Manifest manifest;
     private final boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
 
     public void checkForUpdates() {
@@ -45,33 +60,20 @@ public class UpdateManager {
         statusArg = "";
         isWorking = true;
         try {
-            // ... (rest of the check logic)
+            cleanupDummyFiles();
 
             HttpClient client = HttpClient.newHttpClient();
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(GITHUB_API_URL))
-                    .header("Accept", "application/vnd.github.v3+json")
-                    .build();
-
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(MANIFEST_URL)).build();
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
             if (response.statusCode() == 200) {
-                Map<String, Object> release = GSON.fromJson(response.body(), Map.class);
-                latestVersionTag = (String) release.get("tag_name");
-
-                List<Map<String, Object>> assets = (List<Map<String, Object>>) release.get("assets");
-                for (Map<String, Object> asset : assets) {
-                    String name = (String) asset.get("name");
-                    if (name.endsWith(".zip")) {
-                        downloadUrl = (String) asset.get("browser_download_url");
-                        break;
-                    }
-                }
-
-                String currentVersion = getCurrentVersion();
-                if (!latestVersionTag.equals(currentVersion)) {
+                manifest = GSON.fromJson(response.body(), Manifest.class);
+                List<ManifestFile> toDownload = getFilesToUpdate();
+                
+                if (!toDownload.isEmpty()) {
                     updateAvailable = true;
                     statusKey = "status.found";
-                    statusArg = latestVersionTag;
+                    statusArg = String.valueOf(toDownload.size());
                     Thread.sleep(1500);
                 } else {
                     statusKey = "status.uptodate";
@@ -88,50 +90,89 @@ public class UpdateManager {
         }
     }
 
-    private String getCurrentVersion() {
-        if (Files.exists(CONFIG_PATH)) {
-            try (Reader reader = Files.newBufferedReader(CONFIG_PATH)) {
-                UpdateInfo info = GSON.fromJson(reader, UpdateInfo.class);
-                return info.version;
+    private void cleanupDummyFiles() {
+        Path gameDir = FabricLoader.getInstance().getGameDir();
+        String[] dirs = {"mods", "resourcepacks"};
+        for (String dir : dirs) {
+            Path path = gameDir.resolve(dir);
+            if (!Files.exists(path)) continue;
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                for (Path file : stream) {
+                    if (Files.isRegularFile(file) && Files.size(file) == DUMMY_JAR.length) {
+                        if (java.util.Arrays.equals(Files.readAllBytes(file), DUMMY_JAR)) {
+                            Files.deleteIfExists(file);
+                            LOGGER.info("Cleaned up dummy file: " + file.getFileName());
+                        }
+                    }
+                }
             } catch (IOException e) {
-                LOGGER.error("Error reading config", e);
+                LOGGER.error("Error during dummy cleanup", e);
             }
         }
-        return "none";
+    }
+
+    private List<ManifestFile> getFilesToUpdate() {
+        List<ManifestFile> toUpdate = new ArrayList<>();
+        Path gameDir = FabricLoader.getInstance().getGameDir();
+
+        for (ManifestFile mFile : manifest.files) {
+            Path localPath = gameDir.resolve(mFile.path);
+            if (!Files.exists(localPath)) {
+                toUpdate.add(mFile);
+                continue;
+            }
+            try {
+                String localHash = calculateHash(localPath);
+                if (!localHash.equalsIgnoreCase(mFile.hash)) {
+                    toUpdate.add(mFile);
+                }
+            } catch (Exception e) {
+                toUpdate.add(mFile);
+            }
+        }
+        return toUpdate;
+    }
+
+    private String calculateHash(Path path) throws Exception {
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        try (InputStream is = Files.newInputStream(path)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = is.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte b : digest.digest()) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     public void performUpdate() {
-        if (downloadUrl.isEmpty()) {
-            isWorking = false;
-            return;
-        }
+        if (manifest == null) return;
 
         try {
             MusicManager.playUpdateMusic();
+            List<ManifestFile> toDownload = getFilesToUpdate();
+            long totalDownloadSize = toDownload.stream().mapToLong(f -> f.size).sum();
+            long downloadedTotal = 0;
+
+            // Remove files not in manifest
+            removeUnexpectedFiles();
+
             statusKey = "status.downloading";
-            statusArg = latestVersionTag;
             progress = 0;
-            // ... (rest of method)
 
-            Path tempZip = Files.createTempFile("ciapongi-update", ".zip");
-            downloadFile(downloadUrl, tempZip);
-
-            speed = "";
-            sizeInfo = "";
-            statusKey = "status.removing";
-            statusArg = "";
-            removeOldFiles();
-
-            statusKey = "status.extracting";
-            statusArg = "";
-            List<String> newFiles = extractZip(tempZip);
-
-            saveUpdateInfo(latestVersionTag, newFiles);
-
-            Files.deleteIfExists(tempZip);
-
-            if (!pendingOperations.isEmpty() && isWindows) {
-                scheduleWindowsUpdate();
+            for (int i = 0; i < toDownload.size(); i++) {
+                ManifestFile mFile = toDownload.get(i);
+                statusArg = (i + 1) + "/" + toDownload.size();
+                
+                Path target = FabricLoader.getInstance().getGameDir().resolve(mFile.path);
+                Files.createDirectories(target.getParent());
+                
+                downloadFileGranular(RAW_BASE_URL + mFile.path, target, downloadedTotal, totalDownloadSize);
+                downloadedTotal += mFile.size;
             }
 
             statusKey = "status.complete";
@@ -147,189 +188,91 @@ public class UpdateManager {
         }
     }
 
-    private void scheduleWindowsUpdate() {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try {
-                Path gameDir = FabricLoader.getInstance().getGameDir();
-                Path script = gameDir.resolve("ciapongi-updater-cleanup.bat");
-                StringBuilder sb = new StringBuilder();
-                sb.append("@echo off\n");
-                sb.append("chcp 65001 > nul\n");
-                sb.append("set RETRIES=0\n");
-                sb.append(":retry_loop\n");
-                sb.append("set /a RETRIES+=1\n");
-                sb.append("if %RETRIES% gtr 30 goto end\n");
-                sb.append("set SUCCESS=1\n");
-                
-                for (Map.Entry<Path, Path> entry : pendingOperations.entrySet()) {
-                    String target = entry.getKey().toAbsolutePath().toString();
-                    Path sourcePath = entry.getValue();
-                    
-                    sb.append("if exist \"").append(target).append("\" (\n");
-                    sb.append("  del /f /q \"").append(target).append("\"\n");
-                    sb.append("  if exist \"").append(target).append("\" set SUCCESS=0\n");
-                    sb.append(")\n");
-                    
-                    if (sourcePath != null) {
-                        String source = sourcePath.toAbsolutePath().toString();
-                        sb.append("if exist \"").append(source).append("\" (\n");
-                        sb.append("  if not exist \"").append(target).append("\" (\n");
-                        sb.append("    move /y \"").append(source).append("\" \"").append(target).append("\"\n");
-                        sb.append("    if not exist \"").append(target).append("\" set SUCCESS=0\n");
-                        sb.append("  )\n");
-                        sb.append(")\n");
-                    }
-                }
-                
-                sb.append("if %SUCCESS% == 0 (\n");
-                sb.append("  timeout /t 1 /nobreak > nul\n");
-                sb.append("  goto retry_loop\n");
-                sb.append(")\n");
-                sb.append(":end\n");
-                sb.append("del \"%~f0\"\n");
-                
-                Files.writeString(script, sb.toString());
-
-                Runtime.getRuntime().exec("cmd /c start /min \"\" \"" + script.toAbsolutePath() + "\"");
-                LOGGER.info("Windows update script scheduled at: " + script.toAbsolutePath());
-            } catch (Exception e) {
-                LOGGER.error("Failed to schedule Windows update", e);
-            }
-        }));
-    }
-
-    private void downloadFile(String url, Path target) throws Exception {
-        HttpClient client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.ALWAYS)
-                .build();
-        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url)).build();
-
-        HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1L);
-        
-        if (contentLength > 0) {
-            sizeInfo = String.format(Locale.US, "%.2f MB", contentLength / 1024.0 / 1024.0);
-        }
-
-        try (InputStream is = response.body();
-             OutputStream os = Files.newOutputStream(target)) {
-            byte[] buffer = new byte[8192];
-            long downloaded = 0;
-            int read;
-            long startTime = System.currentTimeMillis();
-            long lastUpdate = startTime;
-            long lastDownloaded = 0;
-
-            while ((read = is.read(buffer)) != -1) {
-                os.write(buffer, 0, read);
-                downloaded += read;
-                
-                long now = System.currentTimeMillis();
-                if (now - lastUpdate > 500) { // Update every 500ms
-                    if (contentLength > 0) {
-                        progress = (float) downloaded / contentLength * 0.5f;
-                    }
-                    
-                    double seconds = (now - lastUpdate) / 1000.0;
-                    double currentSpeed = (downloaded - lastDownloaded) / seconds / 1024.0 / 1024.0; // MB/s
-                    speed = String.format(Locale.US, "%.2f MB/s", currentSpeed);
-                    
-                    lastUpdate = now;
-                    lastDownloaded = downloaded;
-                }
-            }
-        }
-    }
-
-    private void removeOldFiles() {
-        if (!Files.exists(CONFIG_PATH)) return;
-
-        try (Reader reader = Files.newBufferedReader(CONFIG_PATH)) {
-            UpdateInfo info = GSON.fromJson(reader, UpdateInfo.class);
-            Path gameDir = FabricLoader.getInstance().getGameDir();
-
-            for (String filePath : info.files) {
-                Path path = gameDir.resolve(filePath);
-                if (Files.exists(path)) {
-                    try {
-                        Files.delete(path);
-                        LOGGER.info("Deleted old file: " + filePath);
-                    } catch (IOException e) {
-                        if (isWindows) {
-                            pendingOperations.put(path, null);
-                            LOGGER.info("Scheduled deletion for locked file: " + filePath);
-                        } else {
-                            LOGGER.error("Failed to delete " + filePath, e);
-                        }
-                    }
-                }
-            }
-        } catch (IOException e) {
-            LOGGER.error("Error removing old files", e);
-        }
-    }
-
-    private List<String> extractZip(Path zipPath) throws IOException {
-        List<String> extractedFiles = new ArrayList<>();
+    private void removeUnexpectedFiles() {
         Path gameDir = FabricLoader.getInstance().getGameDir();
-        long totalSize = Files.size(zipPath); // Approximate
-        long extractedSize = 0;
+        String[] monitoredDirs = {"mods", "resourcepacks"};
+        
+        for (String dirName : monitoredDirs) {
+            Path dirPath = gameDir.resolve(dirName);
+            if (!Files.exists(dirPath)) continue;
 
-        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipPath))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                String name = entry.getName();
-                
-                // Skip Fabric API to prevent duplicates (it's required by this mod anyway)
-                String fileName = name.contains("/") ? name.substring(name.lastIndexOf("/") + 1) : name;
-                if (fileName.toLowerCase().startsWith("fabric-api")) {
-                    LOGGER.info("Skipping Fabric API: " + name);
-                    zis.closeEntry();
-                    continue;
-                }
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(dirPath)) {
+                for (Path file : stream) {
+                    if (Files.isDirectory(file)) continue;
+                    
+                    String relPath = gameDir.relativize(file).toString().replace("\\\\", "/");
+                    
+                    // Don't delete our own mod!
+                    if (relPath.contains("ciapongiupdater")) continue;
 
-                if (!entry.isDirectory()) {
-                    Path target = gameDir.resolve(name);
-                    Files.createDirectories(target.getParent());
-                    
-                    byte[] data = zis.readAllBytes();
-                    
-                    try {
-                        Files.write(target, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                        LOGGER.info("Extracted: " + name);
-                    } catch (IOException e) {
-                        if (isWindows) {
-                            Path updatedPath = target.resolveSibling(target.getFileName().toString() + ".updated");
-                            Files.write(updatedPath, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                            pendingOperations.put(target, updatedPath);
-                            LOGGER.info("Scheduled move for locked file: " + name);
-                        } else {
-                            throw e;
+                    boolean inManifest = false;
+                    for (ManifestFile mFile : manifest.files) {
+                        if (mFile.path.equals(relPath)) {
+                            inManifest = true;
+                            break;
                         }
                     }
-                    extractedFiles.add(name);
+
+                    if (!inManifest) {
+                        smartDelete(file);
+                    }
                 }
-                extractedSize += entry.getCompressedSize();
-                progress = 0.5f + ((float) extractedSize / totalSize * 0.5f); // Last 50% for extraction
-                zis.closeEntry();
+            } catch (IOException e) {
+                LOGGER.error("Error cleaning directory: " + dirName, e);
             }
         }
-        return extractedFiles;
     }
 
-    private void saveUpdateInfo(String version, List<String> files) throws IOException {
-        Files.createDirectories(CONFIG_PATH.getParent());
-        UpdateInfo info = new UpdateInfo();
-        info.version = version;
-        info.files = files;
-
-        try (Writer writer = Files.newBufferedWriter(CONFIG_PATH)) {
-            GSON.toJson(info, writer);
+    private void smartDelete(Path path) {
+        try {
+            Files.deleteIfExists(path);
+            LOGGER.info("Deleted: " + path.getFileName());
+        } catch (IOException e) {
+            if (isWindows) {
+                try (FileOutputStream fos = new FileOutputStream(path.toFile())) {
+                    fos.write(DUMMY_JAR);
+                    fos.flush();
+                    LOGGER.info("Windows Lock: Replaced with dummy: " + path.getFileName());
+                } catch (IOException ex) {
+                    LOGGER.error("Failed to dummy file: " + path, ex);
+                }
+            }
         }
     }
 
-    private static class UpdateInfo {
-        String version;
-        List<String> files;
+    private void downloadFileGranular(String url, Path target, long alreadyDownloaded, long totalSize) throws Exception {
+        HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
+        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(url)).build();
+        HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+        byte[] data;
+        try (InputStream is = response.body()) {
+            data = is.readAllBytes();
+        }
+
+        try {
+            Files.write(target, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException e) {
+            if (isWindows) {
+                smartDelete(target);
+                Files.write(target, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            } else {
+                throw e;
+            }
+        }
+
+        if (totalSize > 0) {
+            progress = (float) (alreadyDownloaded + data.length) / totalSize;
+        }
+    }
+
+    private static class Manifest {
+        List<ManifestFile> files;
+    }
+
+    private static class ManifestFile {
+        String path;
+        String hash;
+        long size;
     }
 }
