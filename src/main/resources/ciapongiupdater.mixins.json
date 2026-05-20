@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "package": "pl.szablix.ciapongiupdater.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "SplashOverlayMixin",
+    "SoundManagerMixin"
+  ],
+  "client": [
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
