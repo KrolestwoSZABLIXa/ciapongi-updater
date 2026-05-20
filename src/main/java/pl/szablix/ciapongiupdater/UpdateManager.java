@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream;
 
 public class UpdateManager {
     private static final Logger LOGGER = LoggerFactory.getLogger("CiapongiUpdater-UpdateManager");
-    private static final String MANIFEST_URL = "https://raw.githubusercontent.com/KrolestwoSZABLIXa/Ciapongi-RP/main/manifest.json";
+    private static final String GITHUB_API_URL = "https://api.github.com/repos/KrolestwoSZABLIXa/Ciapongi-RP/releases/latest";
     private static final String RAW_BASE_URL = "https://raw.githubusercontent.com/KrolestwoSZABLIXa/Ciapongi-RP/main/";
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("ciapongiupdater/latestversion.json");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -50,7 +50,10 @@ public class UpdateManager {
     public volatile String sizeInfo = "";
     public volatile boolean isWorking = true;
     public volatile boolean updateAvailable = false;
+    public volatile boolean userApproved = false;
     public volatile boolean needsRestart = false;
+    public volatile String latestVersionTag = "";
+    public volatile String changelog = "";
     
     private Manifest manifest;
     private final boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
@@ -63,20 +66,35 @@ public class UpdateManager {
             cleanupDummyFiles();
 
             HttpClient client = HttpClient.newHttpClient();
-            HttpRequest request = HttpRequest.newBuilder().uri(URI.create(MANIFEST_URL)).build();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(GITHUB_API_URL))
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .build();
+
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() == 200) {
-                manifest = GSON.fromJson(response.body(), Manifest.class);
-                List<ManifestFile> toDownload = getFilesToUpdate();
-                
-                if (!toDownload.isEmpty()) {
-                    updateAvailable = true;
-                    statusKey = "status.found";
-                    statusArg = String.valueOf(toDownload.size());
-                    Thread.sleep(1500);
+                Map<String, Object> release = GSON.fromJson(response.body(), Map.class);
+                latestVersionTag = (String) release.get("tag_name");
+                changelog = (String) release.get("body");
+                if (changelog == null) changelog = "";
+
+                // Download manifest from the same release or from main as fallback
+                String manifestJson = downloadManifest();
+                if (manifestJson != null) {
+                    manifest = GSON.fromJson(manifestJson, Manifest.class);
+                    List<ManifestFile> toDownload = getFilesToUpdate();
+                    
+                    if (!toDownload.isEmpty()) {
+                        updateAvailable = true;
+                        statusKey = "status.found";
+                        statusArg = latestVersionTag;
+                    } else {
+                        statusKey = "status.uptodate";
+                        isWorking = false;
+                    }
                 } else {
-                    statusKey = "status.uptodate";
+                    statusKey = "status.failed";
                     isWorking = false;
                 }
             } else {
@@ -87,6 +105,19 @@ public class UpdateManager {
             LOGGER.error("Error checking for updates", e);
             statusKey = "status.failed";
             isWorking = false;
+        }
+    }
+
+    private String downloadManifest() {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://raw.githubusercontent.com/KrolestwoSZABLIXa/Ciapongi-RP/main/manifest.json"))
+                    .build();
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            return response.statusCode() == 200 ? response.body() : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -151,47 +182,47 @@ public class UpdateManager {
 
     public void performUpdate() {
         if (manifest == null) return;
+        userApproved = true; // Mark as approved to start progress rendering
+        
+        new Thread(() -> {
+            try {
+                MusicManager.playUpdateMusic();
+                List<ManifestFile> toDownload = getFilesToUpdate();
+                long totalDownloadSize = toDownload.stream().mapToLong(f -> f.size).sum();
+                long downloadedTotal = 0;
 
-        try {
-            MusicManager.playUpdateMusic();
-            List<ManifestFile> toDownload = getFilesToUpdate();
-            long totalDownloadSize = toDownload.stream().mapToLong(f -> f.size).sum();
-            long downloadedTotal = 0;
+                removeUnexpectedFiles();
 
-            // Remove files not in manifest
-            removeUnexpectedFiles();
+                statusKey = "status.downloading";
+                progress = 0;
 
-            statusKey = "status.downloading";
-            progress = 0;
+                for (int i = 0; i < toDownload.size(); i++) {
+                    ManifestFile mFile = toDownload.get(i);
+                    statusArg = (i + 1) + "/" + toDownload.size();
+                    Path target = FabricLoader.getInstance().getGameDir().resolve(mFile.path);
+                    Files.createDirectories(target.getParent());
+                    downloadFileGranular(RAW_BASE_URL + mFile.path, target, downloadedTotal, totalDownloadSize);
+                    downloadedTotal += mFile.size;
+                }
 
-            for (int i = 0; i < toDownload.size(); i++) {
-                ManifestFile mFile = toDownload.get(i);
-                statusArg = (i + 1) + "/" + toDownload.size();
-                
-                Path target = FabricLoader.getInstance().getGameDir().resolve(mFile.path);
-                Files.createDirectories(target.getParent());
-                
-                downloadFileGranular(RAW_BASE_URL + mFile.path, target, downloadedTotal, totalDownloadSize);
-                downloadedTotal += mFile.size;
+                List<String> currentFiles = new ArrayList<>();
+                for (ManifestFile mFile : manifest.files) {
+                    currentFiles.add(mFile.path);
+                }
+                saveUpdateInfo(currentFiles);
+
+                statusKey = "status.complete";
+                statusArg = "";
+                needsRestart = true;
+                MusicManager.stop();
+            } catch (Exception e) {
+                LOGGER.error("Update failed", e);
+                statusKey = "status.failed";
+                MusicManager.stop();
+            } finally {
+                isWorking = false;
             }
-
-            List<String> currentFiles = new ArrayList<>();
-            for (ManifestFile mFile : manifest.files) {
-                currentFiles.add(mFile.path);
-            }
-            saveUpdateInfo(currentFiles);
-
-            statusKey = "status.complete";
-            statusArg = "";
-            needsRestart = true;
-            MusicManager.stop();
-        } catch (Exception e) {
-            LOGGER.error("Update failed", e);
-            statusKey = "status.failed";
-            MusicManager.stop();
-        } finally {
-            isWorking = false;
-        }
+        }, "CiapongiUpdater-Exec").start();
     }
 
     private void removeUnexpectedFiles() {
